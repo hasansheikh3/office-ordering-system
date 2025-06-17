@@ -1,0 +1,692 @@
+body {
+    font-family: sans-serif;
+    line-height: 1.6;
+    margin: 0;
+    padding: 20px;
+    background-color: #f4f4f4;
+    color: #333;
+    display: flex;
+    justify-content: center;
+    align-items: flex-start; /* Align items to the top */
+    min-height: 100vh;
+}
+
+.container {
+    background-color: #fff;
+    padding: 30px;
+    border-radius: 8px;
+    box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+    width: 100%;
+    max-width: 700px; /* Increased width for row-based layout */
+}
+
+h2 {
+    text-align: center;
+    color: #555;
+    margin-bottom: 20px;
+}
+
+#name-input-section,
+#order-form-section,
+#admin-name-section, /* Added admin name section */
+#admin-content-section, /* Added admin content section */
+#admin-new-order-section /* Added admin new order section */
+{
+    margin-bottom: 20px;
+}
+
+#user-name-input,
+#order-form input[type="text"],
+#admin-name-input, /* Added admin name input */
+#admin-order-form input[type="text"] /* Added admin order form inputs */
+{
+    width: calc(100% - 22px); /* Adjust for padding and border */
+    padding: 10px;
+    margin-bottom: 10px;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    font-size: 1rem;
+}
+
+button {
+    display: inline-block;
+    background-color: #5cb85c;
+    color: white;
+    padding: 10px 20px;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 1rem;
+    transition: background-color 0.3s ease;
+    margin-right: 5px; /* Add some spacing between buttons */
+}
+
+button:last-child {
+    margin-right: 0;
+}
+
+
+button:hover {
+    background-color: #4cae4c;
+}
+
+.form-group {
+    margin-bottom: 15px;
+}
+
+.form-group label {
+    display: block;
+    margin-bottom: 5px;
+    font-weight: bold;
+}
+
+.form-group small.description {
+    display: block;
+    color: #777;
+    font-size: 0.8em;
+    margin-top: 3px;
+}
+
+.status {
+    margin-top: 15px;
+    padding: 10px;
+    border-radius: 4px;
+    text-align: center;
+}
+
+.status.success {
+    background-color: #dff0d8;
+    color: #3c763d;
+    border: 1px solid #d6e9c6;
+}
+
+.status.error {
+    background-color: #f2dede;
+    color: #a94442;
+    border: 1px solid #ebccd1;
+}
+
+/* Admin Page Specific Styles */
+.admin-actions { /* Style for the buttons div */
+    text-align: center;
+    margin-bottom: 20px;
+}
+
+#admin-list {
+    list-style: none;
+    padding: 0;
+    margin-top: 20px;
+}
+
+/* No Orders Message */
+.no-orders {
+    background-color: #f8f9fa;
+    padding: 20px;
+    text-align: center;
+    border-radius: 8px;
+    color: #6c757d;
+    font-style: italic;
+    border: 2px dashed #dee2e6;
+}
+
+/* Order Card Styles */
+.order-card {
+    background-color: #fff;
+    border: 1px solid #e0e0e0;
+    border-radius: 8px;
+    margin-bottom: 15px;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+    overflow: hidden;
+    transition: box-shadow 0.2s ease;
+}
+
+.order-card:hover {
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
+}
+
+/* Order Header */
+.order-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 15px 20px;
+    background-color: #f8f9fa;
+    border-bottom: 1px solid #e9ecef;
+}
+
+.order-user {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.order-user strong {
+    color: #2c3e50;
+    font-size: 1.1em;
+}
+
+.order-time {
+    font-size: 0.85em;
+    color: #6c757d;
+}
+
+.order-count {
+    font-size: 0.8em;
+    color: #28a745;
+    background-color: #d4edda;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-weight: 500;
+}
+
+.order-actions {
+    display: flex;
+    align-items: center;
+}
+
+/* Delete Button */
+.delete-order-btn {
+    background-color: #dc3545;
+    color: white;
+    border: none;
+    border-radius: 6px;
+    padding: 8px 12px;
+    cursor: pointer;
+    font-size: 0.9em;
+    transition: all 0.2s ease;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 36px;
+    height: 36px;
+}
+
+.delete-order-btn:hover {
+    background-color: #c82333;
+    transform: scale(1.05);
+}
+
+.delete-icon {
+    font-size: 1.2em;
+    font-weight: bold;
+    line-height: 1;
+}
+
+/* Order Items */
+.order-items {
+    padding: 15px 20px;
+}
+
+.order-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 0;
+    border-bottom: 1px solid #f1f3f4;
+}
+
+.order-item:last-child {
+    border-bottom: none;
+}
+
+.item-name {
+    font-weight: 500;
+    color: #2c3e50;
+    flex: 1;
+}
+
+.item-quantity {
+    color: #6c757d;
+    font-size: 0.9em;
+    background-color: #f8f9fa;
+    padding: 4px 8px;
+    border-radius: 4px;
+    margin-left: 10px;
+}
+
+.item-time {
+    font-size: 0.75em;
+    color: #adb5bd;
+    font-style: italic;
+    margin-left: 10px;
+}
+
+/* Order Footer */
+.order-footer {
+    padding: 12px 20px;
+    background-color: #f8f9fa;
+    border-top: 1px solid #e9ecef;
+    text-align: right;
+}
+
+.order-amount {
+    font-weight: bold;
+    color: #28a745;
+    font-size: 1.1em;
+}
+
+/* Legacy styles for backward compatibility */
+#admin-list li:not(.order-card):not(.no-orders) {
+    background-color: #eee;
+    padding: 10px;
+    margin-bottom: 10px;
+    border-radius: 4px;
+    border-left: 5px solid #5cb85c;
+    position: relative;
+    padding-right: 80px;
+}
+
+#admin-list li:not(.order-card):not(.no-orders) strong {
+    color: #333;
+}
+
+#admin-list li:not(.order-card):not(.no-orders) span {
+    display: block;
+    font-size: 0.9em;
+    color: #555;
+    margin-top: 3px;
+}
+
+
+#download-btn {
+    margin-top: 20px;
+    background-color: #0275d8;
+}
+
+#download-btn:hover {
+    background-color: #025aa5;
+}
+
+#delete-all-btn { /* Specific style for delete all */
+    background-color: #d9534f;
+}
+#delete-all-btn:hover {
+    background-color: #c9302c;
+}
+
+/* Removed conflicting #total-amount rule that was hiding the input field */
+
+/* Styles for the element to be captured by html2canvas */
+#capture-area {
+    padding: 20px;
+    background-color: #fff;
+    border-radius: 8px;
+    box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+    width: 100%;
+    max-width: 500px;
+    box-sizing: border-box; /* Include padding in width */
+}
+
+#capture-area h2 {
+     margin-bottom: 10px;
+}
+
+#capture-area p {
+    margin-bottom: 5px;
+}
+
+#capture-area ul {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}
+
+#capture-area li {
+    background-color: #f9f9f9;
+    padding: 8px;
+    margin-bottom: 8px;
+    border-left: 4px solid #5cb85c;
+    font-size: 0.9em;
+    /* Remove delete button from capture area */
+    position: static;
+    padding-right: 8px;
+}
+
+#capture-area li strong {
+    display: inline-block;
+    min-width: 80px; /* Align labels */
+}
+
+#capture-area .capture-header,
+#capture-area .capture-footer {
+    text-align: center;
+    margin-bottom: 15px;
+    font-size: 0.9em;
+    color: #666;
+}
+
+#capture-area .capture-footer {
+    margin-top: 15px;
+    border-top: 1px dashed #ccc;
+    padding-top: 10px;
+    font-weight: bold;
+    font-size: 1em;
+    color: #333;
+}
+
+#capture-area #capture-total {
+    text-align: right;
+    margin-top: 10px;
+    font-weight: bold;
+}
+
+#admin-new-order-section h3 { /* Style for the new form title */
+    text-align: center;
+    color: #555;
+    margin-bottom: 20px;
+}
+
+#admin-order-form button[type="button"] { /* Style for the cancel button */
+    background-color: #f0ad4e;
+}
+#admin-order-form button[type="button"]:hover {
+    background-color: #ec971f;
+}
+
+/* === NEW DYNAMIC ORDER FORM STYLES === */
+
+/* Order Items Container */
+.order-items-container {
+    margin-bottom: 25px;
+}
+
+.items-header {
+    text-align: center;
+    margin-bottom: 20px;
+}
+
+.items-header h3 {
+    margin: 0 0 5px 0;
+    color: #555;
+    font-size: 1.2em;
+}
+
+.items-header .description {
+    color: #777;
+    font-size: 0.9em;
+}
+
+/* Table Header */
+.items-table-header {
+    display: grid;
+    grid-template-columns: 2fr 1fr 80px;
+    gap: 10px;
+    padding: 10px;
+    background-color: #f8f9fa;
+    border-radius: 6px;
+    margin-bottom: 10px;
+    font-weight: bold;
+    color: #555;
+    font-size: 0.9em;
+}
+
+.header-item, .header-quantity, .header-actions {
+    text-align: center;
+}
+
+.header-item {
+    text-align: left;
+}
+
+/* Order Items */
+.order-items {
+    margin-bottom: 15px;
+}
+
+.order-item-row {
+    display: grid;
+    grid-template-columns: 2fr 1fr 80px;
+    gap: 10px;
+    padding: 10px;
+    background-color: #fff;
+    border: 1px solid #e0e0e0;
+    border-radius: 6px;
+    margin-bottom: 8px;
+    align-items: center;
+    transition: box-shadow 0.2s ease;
+}
+
+.order-item-row:hover {
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+.order-item-row input[type="text"] {
+    width: 100%;
+    padding: 8px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    font-size: 0.9em;
+    box-sizing: border-box;
+}
+
+.order-item-row input[type="text"]:focus {
+    outline: none;
+    border-color: #5cb85c;
+    box-shadow: 0 0 0 2px rgba(92, 184, 92, 0.2);
+}
+
+/* Delete Button */
+.delete-item-btn {
+    background-color: #dc3545;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    padding: 8px;
+    cursor: pointer;
+    font-size: 0.8em;
+    transition: background-color 0.2s ease;
+    width: 100%;
+}
+
+.delete-item-btn:hover {
+    background-color: #c82333;
+}
+
+.delete-item-btn:disabled {
+    background-color: #6c757d;
+    cursor: not-allowed;
+    opacity: 0.6;
+}
+
+/* Add Item Button */
+.add-item-container {
+    text-align: center;
+    margin-bottom: 20px;
+}
+
+.add-btn {
+    background-color: #28a745;
+    color: white;
+    border: none;
+    border-radius: 6px;
+    padding: 12px 20px;
+    cursor: pointer;
+    font-size: 1em;
+    transition: background-color 0.2s ease;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.add-btn:hover {
+    background-color: #218838;
+}
+
+.plus-icon {
+    font-size: 1.2em;
+    font-weight: bold;
+}
+
+/* Total Section */
+.total-section {
+    background-color: #f8f9fa;
+    padding: 20px;
+    border-radius: 8px;
+    margin-bottom: 20px;
+    border: 2px solid #e9ecef;
+}
+
+.total-display {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 1.1em;
+    font-weight: bold;
+}
+
+.total-display label {
+    color: #555;
+    margin: 0;
+}
+
+.total-amount-container {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+}
+
+.currency {
+    color: #555;
+    font-weight: bold;
+}
+
+#total-amount {
+    background-color: #fff;
+    border: 2px solid #5cb85c;
+    border-radius: 6px;
+    padding: 10px 15px;
+    font-size: 1.1em;
+    font-weight: bold;
+    color: #2d5a2d;
+    text-align: right;
+    width: 200px;
+    box-sizing: border-box;
+    cursor: text;
+    outline: none;
+}
+
+#total-amount:focus {
+    border-color: #28a745;
+    box-shadow: 0 0 0 3px rgba(40, 167, 69, 0.25);
+    background-color: #f8fff8;
+}
+
+#total-amount:hover {
+    border-color: #28a745;
+}
+
+.total-description {
+    display: block;
+    color: #777;
+    font-size: 0.85em;
+    margin-top: 8px;
+    text-align: center;
+    font-style: italic;
+}
+
+/* Form Actions */
+.form-actions {
+    display: flex;
+    gap: 15px;
+    justify-content: center;
+    flex-wrap: wrap;
+}
+
+.submit-btn {
+    background-color: #007bff;
+    color: white;
+    border: none;
+    border-radius: 6px;
+    padding: 12px 30px;
+    cursor: pointer;
+    font-size: 1.1em;
+    font-weight: bold;
+    transition: background-color 0.2s ease;
+}
+
+.submit-btn:hover {
+    background-color: #0056b3;
+}
+
+.clear-btn {
+    background-color: #6c757d;
+    color: white;
+    border: none;
+    border-radius: 6px;
+    padding: 12px 20px;
+    cursor: pointer;
+    font-size: 1em;
+    transition: background-color 0.2s ease;
+}
+
+.clear-btn:hover {
+    background-color: #545b62;
+}
+
+/* Responsive Design */
+@media (max-width: 768px) {
+    .container {
+        max-width: 100%;
+        padding: 20px;
+    }
+
+    .items-table-header,
+    .order-item-row {
+        grid-template-columns: 1fr;
+        gap: 8px;
+        text-align: left;
+    }
+
+    .header-actions {
+        display: none;
+    }
+
+    .delete-item-btn {
+        margin-top: 8px;
+        width: auto;
+        align-self: flex-end;
+    }
+
+    .total-display {
+        flex-direction: column;
+        gap: 10px;
+        text-align: center;
+    }
+
+    #total-amount {
+        width: 100%;
+        max-width: 200px;
+        margin: 0 auto;
+    }
+
+    .form-actions {
+        flex-direction: column;
+    }
+
+    .submit-btn, .clear-btn {
+        width: 100%;
+    }
+
+    /* Admin page responsive styles */
+    .order-header {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 10px;
+    }
+
+    .order-actions {
+        align-self: flex-end;
+    }
+
+    .order-item {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 5px;
+    }
+
+    .item-quantity {
+        margin-left: 0;
+        align-self: flex-start;
+    }
+}
+

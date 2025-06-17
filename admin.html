@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Office Ordering System - Admin</title>
+    <link rel="stylesheet" href="style.css">
+    <!-- Include Noto Sans Arabic font for Urdu support -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Arabic:wght@400;700&display=swap" rel="stylesheet">
+    <!-- Include jsPDF library for PDF generation -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <!-- Include html2canvas for Urdu text rendering -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+    <!-- Include configuration -->
+    <script src="config.js"></script>
+</head>
+<body>
+    <div class="container">
+        <!-- Admin Name Input Section -->
+        <div id="admin-name-section">
+            <h2>Admin Access</h2>
+            <p>Please enter the admin name to view orders.</p>
+            <input type="text" id="admin-name-input" placeholder="Enter name">
+            <button id="admin-name-submit">Submit</button>
+            <div id="admin-name-status" class="status" style="display: none;"></div>
+        </div>
+
+        <!-- Main Admin Content Section (Initially Hidden) -->
+        <div id="admin-content-section" style="display: none;">
+            <h2>Office Orders List</h2>
+
+            <!-- Buttons for actions -->
+            <div class="admin-actions">
+                 <button id="new-order-btn">New Order</button>
+                 <button id="delete-all-btn" style="background-color: #d9534f;">Delete All Orders</button>
+            </div>
+
+
+            <!-- This div will be captured as an image -->
+            <div id="capture-area">
+                <div class="capture-header">
+                    <p>Office Peon Orders</p>
+                    <p id="capture-datetime"></p>
+                </div>
+                <ul id="admin-list">
+                    <!-- Orders will be loaded here by admin.js -->
+                </ul>
+                 <div class="capture-footer">
+                     <p id="capture-total"></p>
+                 </div>
+            </div>
+
+
+            <button id="download-btn">Download List as PDF</button>
+
+            <div id="loading-status" style="display: none; text-align: center; margin-top: 20px;">Loading orders...</div>
+            <div id="error-status" style="display: none; text-align: center; margin-top: 20px; color: red;">Error loading orders.</div>
+        </div>
+
+         <!-- Admin New Order Section (Initially Hidden) -->
+        <div id="admin-new-order-section" style="display: none;">
+            <h3>Submit New Order (Admin)</h3>
+            <form id="admin-order-form">
+                 <div class="form-group">
+                    <label for="admin-name">Name:</label>
+                    <input type="text" id="admin-name" required>
+                    <small class="description">Name of the person making the request</small>
+                </div>
+                <div class="form-group">
+                    <label for="admin-item">Item:</label>
+                    <input type="text" id="admin-item" required>
+                    <small class="description">e.g., Coffee, Snacks, Printout</small>
+                </div>
+                <div class="form-group">
+                    <label for="admin-quantity">Quantity:</label>
+                    <input type="text" id="admin-quantity" required>
+                    <small class="description">e.g., 1 cup, 2 packets</small>
+                </div>
+                <div class="form-group">
+                    <label for="admin-amount">Amount (if applicable):</label>
+                    <input type="text" id="admin-amount" required>
+                    <small class="description">e.g., 50 Rs, 100 Rs, 0 Rs</small>
+                </div>
+                <button type="submit">Submit New Order</button>
+                <button type="button" id="cancel-new-order" style="background-color: #f0ad4e;">Cancel</button>
+            </form>
+            <div id="admin-order-status" class="status" style="display: none;"></div>
+        </div>
+
+    </div>
+
+    <script src="admin.js"></script>
+</body>
+</html>
