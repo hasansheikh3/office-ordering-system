@@ -7,13 +7,14 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pathspec
-import re
-from typing import List, Dict, Any, Generator, Tuple, Optional
+from typing import List, Dict, Any, Generator, Optional
 from collections import Counter
 from tree_sitter import Language, Parser, Node
 from tqdm import tqdm
-import platform
 import time
+import datetime
+import concurrent.futures
+import threading
 
 # Import tree-sitter language modules
 try:
@@ -51,9 +52,12 @@ class RepoParser:
             # Add these missing extensions:
             ".html": "html", ".htm": "html", ".css": "css", ".scss": "scss", ".sass": "scss",
             ".xml": "xml", ".svg": "xml", ".sql": "sql", ".sh": "bash", ".bash": "bash",
-            ".ps1": "powershell", ".bat": "batch", ".dockerfile": "dockerfile", ".gitignore": "text"
+            ".ps1": "powershell", ".bat": "batch", ".dockerfile": "dockerfile", ".gitignore": "text",
+            ".cs" : "csharp", ".kt" : "kotlin", ".dart" : "dart", ".scala" : "scala", ".hs" : "haskell",
+            ".lua" : "lua", ".properties" : "properties"
         }
         self.ts_languages = {}
+        self._language_lock = threading.Lock()
         self.language_modules = {
             'python': tspython if 'tspython' in globals() else None,
             'javascript': tsjavascript if 'tsjavascript' in globals() else None,
@@ -157,8 +161,60 @@ class RepoParser:
                 "out_calls": "(method_invocation) @call",
                 "symbols": ["class_declaration", "interface_declaration", "method_declaration", "field_declaration"],
                 "variables": "(field_declaration) @field"
+            }, 
+            "csharp": {
+                "imports": "(using_directive) @import",
+                "out_calls": "(invocation_expression) @call",
+                "symbols": ["class_declaration", "method_declaration", "struct_declaration"],
+                "function_signature": "(method_declaration name: (identifier) @func_name parameters: (parameter_list) @params)",
+                "class_signature": "(class_declaration name: (identifier) @class_name)"
+            },
+            "kotlin": {
+                "imports": "(import_header) @import",
+                "out_calls": "(call_expression) @call",
+                "symbols": ["class_declaration", "function_declaration", "object_declaration"],
+                "function_signature": "(function_declaration name: (simple_identifier) @func_name parameters: (function_value_parameters) @params)",
+                "class_signature": "(class_declaration name: (type_identifier) @class_name)"
             }
         }
+
+        # Enhanced queries to capture full signature
+        self.queries["python"].update({
+            "function_signature" : "(function_definition name: (identifier) @func_name parameters: (parameters) @params)",
+            "class_signature": "(class_definition name: (identifier) @class_name)"
+        })
+        self.queries["javascript"].update({
+            "function_signature": "(function_declaration name: (identifier) @func_name parameters: (formal_parameters) @params)",
+            "class_signature": "(class_declaration name: (identifier) @class_name)"
+        })
+        self.queries["typescript"].update({
+            "function_signature": "(function_declaration name: (identifier) @func_name parameters: (formal_parameters) @params)",
+            "class_signature": "(class_declaration name: (identifier) @class_name)"
+        })
+        self.queries["go"].update({
+            "function_signature": "(function_declaration name: (identifier) @func_name parameters: (parameter_list) @params)",
+            "type_signature": "(type_spec name: (identifier) @type_name)"
+        })
+        self.queries["c"].update({
+            "function_signature": "(function_definition declarator: (declarator identifier: (identifier) @func_name) parameters: (parameter_list) @params)",
+            "struct_signature": "(struct_specifier name: (identifier) @struct_name)"
+        })
+        self.queries["cpp"].update({
+            "function_signature": "(function_definition declarator: (declarator identifier: (identifier) @func_name) parameters: (parameter_list) @params)",
+            "class_signature": "(class_specifier name: (identifier) @class_name)",
+            "namespace_signature": "(namespace_definition name: (identifier) @namespace_name)"
+        })
+        self.queries["rust"].update({
+            "function_signature": "(function_item name: (identifier) @func_name parameters: (parameter_list) @params)",
+            "struct_signature": "(struct_item name: (identifier) @struct_name)",
+            "enum_signature": "(enum_item name: (identifier) @enum_name)"
+        })
+        self.queries["java"].update({
+            "function_signature": "(method_declaration name: (identifier) @func_name parameters: (formal_parameters) @params)",
+            "class_signature": "(class_declaration name: (identifier) @class_name)",
+            "interface_signature": "(interface_declaration name: (identifier) @interface_name)"
+        })
+        # Add queries for other languages as needed
 
     def _get_ignore_spec(self, repo_path: str) -> pathspec.PathSpec:
         patterns = []
@@ -170,8 +226,11 @@ class RepoParser:
         # Add common ignore patterns
         patterns.extend([
             '*.pyc', '__pycache__/', '.git/', 'node_modules/', '.venv/', 'venv/',
-            '*.log', '*.tmp', '.DS_Store', 'Thumbs.db', '*.swp', '*.swo'
+            '*.log', '*.tmp', '.DS_Store', 'Thumbs.db', '*.swp', '*.swo',
+            ".env", "*.secret", "*.key", "*.pem", "*.cert",
+            "vendor/", "dist/", "build/", "out/", "target/"
         ])
+        
         patterns.extend(self.ignore_dirs)
         patterns.extend(self.ignore_files)
         return pathspec.PathSpec.from_lines('gitwildmatch', patterns)
@@ -255,68 +314,191 @@ class RepoParser:
         
         print("=" * 50)
 
-    def parse_repo(self, repo_path: str) -> List[Dict[str, Any]]:
+    def parse_repo(self, repo_path: str, max_workers: int = None) -> List[Dict[str, Any]]:
+        """Parse repository with parallel processing for blazing speed"""
         files_to_parse = self.get_files_to_parse(repo_path)
         all_chunks = []
         
-        print(f"🚀 Parsing {len(files_to_parse)} files...")
+        # Determine optimal number of workers
+        if max_workers is None:
+            max_workers = min(32, (os.cpu_count() or 1) + 4)  # Default from ThreadPoolExecutor
         
-        for i, file_path in enumerate(tqdm(files_to_parse, desc="Parsing repository")):
-            full_path = os.path.join(repo_path, file_path)
-            print(f"  Processing: {file_path} ({i+1}/{len(files_to_parse)})")
+        print(f"🚀 Parsing {len(files_to_parse)} files with {max_workers} workers...")
+        
+        # Batch files for better progress tracking
+        batch_size = max(1, len(files_to_parse) // 20)  # 20 progress updates
+        successful_files = 0
+        failed_files = 0
+        total_chunks = 0
+        
+        start_time = time.time()
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all parsing tasks
+            future_to_file = {
+                executor.submit(self._parse_file_safe, os.path.join(repo_path, file_path), file_path, repo_path): file_path
+                for file_path in files_to_parse
+            }
             
-            # Skip very large files (>1MB)
-            if os.path.getsize(full_path) > 1 * 1024 * 1024:
-                print(f"  ⚠️ Skipping large file: {file_path}")
-                continue
-                
-            try:
-                # Add timeout for parsing
-                start_time = time.time()
-                file_chunks = self._parse_file(full_path, file_path, repo_path)
-                elapsed = time.time() - start_time
-                
-                if elapsed > 5:  # Warn about slow files
-                    print(f"  ⏱️ Parsed {file_path} in {elapsed:.2f}s")
+            # Process completed tasks with progress tracking
+            with tqdm(total=len(files_to_parse), desc="Parsing files", unit="files") as pbar:
+                for future in concurrent.futures.as_completed(future_to_file):
+                    file_path = future_to_file[future]
                     
-                all_chunks.extend(file_chunks)
-                print(f"  Generated {len(file_chunks)} chunks for {file_path}")
-            except Exception as e:
-                print(f"  ❌ Error parsing {file_path}: {str(e)}")
-                continue
+                    try:
+                        file_chunks = future.result(timeout=30)  # 30s timeout per file
+                        if file_chunks:
+                            all_chunks.extend(file_chunks)
+                            total_chunks += len(file_chunks)
+                            successful_files += 1
+                            pbar.set_postfix({
+                                'chunks': total_chunks,
+                                'success': successful_files,
+                                'failed': failed_files
+                            })
+                        else:
+                            failed_files += 1
+                            
+                    except concurrent.futures.TimeoutError:
+                        print(f"  ⏰ Timeout parsing {file_path}")
+                        failed_files += 1
+                    except Exception as e:
+                        print(f"  ❌ Error parsing {file_path}: {str(e)}")
+                        failed_files += 1
+                    
+                    pbar.update(1)
         
-        print(f"✅ Generated {len(all_chunks)} chunks")
+        elapsed_time = time.time() - start_time
+        
+        # Enhanced completion stats
+        print(f"\n✅ Parallel parsing complete!")
+        print(f"⏱️  Total time: {elapsed_time:.2f}s")
+        print(f"📊 Files processed: {successful_files}/{len(files_to_parse)} ({successful_files/len(files_to_parse)*100:.1f}%)")
+        print(f"🧩 Total chunks: {total_chunks:,}")
+        print(f"🚄 Average speed: {len(files_to_parse)/elapsed_time:.1f} files/sec")
+        print(f"⚡ Chunk generation rate: {total_chunks/elapsed_time:.1f} chunks/sec")
+        
+        if failed_files > 0:
+            print(f"⚠️  Failed files: {failed_files}")
+        
         return all_chunks
 
+    def _parse_file_safe(self, file_path: str, relative_path: str, repo_path: str) -> List[Dict[str, Any]]:
+        """Thread-safe wrapper for file parsing with error handling"""
+        try:
+            # Skip very large files (>2MB) to prevent memory issues in parallel processing
+            if os.path.getsize(file_path) > 2 * 1024 * 1024:
+                print(f"  ⚠️ Skipping large file: {relative_path}")
+                return []
+            
+            # Add parsing timeout for individual files
+            start_time = time.time()
+            file_chunks = self._parse_file(file_path, relative_path, repo_path)
+            elapsed = time.time() - start_time
+            
+            # Log slow files for optimization
+            if elapsed > 3:
+                print(f"  🐌 Slow parse: {relative_path} took {elapsed:.2f}s")
+            
+            return file_chunks
+            
+        except Exception as e:
+            # Detailed error logging for debugging
+            print(f"  ❌ Parse error in {relative_path}: {type(e).__name__}: {str(e)}")
+            return []
+        
+    def _get_language_thread_safe(self, file_path: str) -> Optional[Language]:
+        """Thread-safe version of language detection"""
+        extension = os.path.splitext(file_path)[1].lower()
+        lang_name = self.language_map.get(extension)
+
+        if not lang_name:
+            return None
+
+        # Handle document/config types (no tree-sitter needed)
+        if lang_name in ["markdown", "rst", "text", "json", "yaml", "toml", "ini"]:
+            class SimpleLang:
+                def __init__(self, name): self.name = name
+            return SimpleLang(lang_name)
+
+        # Thread-safe language loading with lock
+        with self._language_lock:
+            # Return cached if already loaded
+            if lang_name in self.ts_languages:
+                return self.ts_languages[lang_name]
+
+            try:
+                ts_lang = Language(f"/home/hasan/.tree-sitter/repos/{lang_name}.so", lang_name)
+                self.ts_languages[lang_name] = ts_lang
+                return ts_lang
+            except Exception as e:
+                print(f"❌ Failed to load {lang_name}: {e}")
+                return None
+
+
     def _parse_file(self, file_path: str, relative_path: str, repo_path: str) -> List[Dict[str, Any]]:
-        language = self._get_language(file_path)
+        language = self._get_language_thread_safe(file_path)
         if not language:
             return []
 
         try:
             with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                 code = f.read()
+                last_modified = os.path.getmtime(file_path)
         except (IOError, UnicodeDecodeError) as e:
             print(f"Error reading file {file_path}: {e}")
             return []
+        
+        # Handle LICENSE Files as single chunks
+        base_name = os.path.basename(file_path).lower()
+        if "license" in base_name or "copying" in base_name:
+            token_count = len(self.encoding.encode(code))
+            return [self._create_chunk_dict(
+                relative_path, language.name, "license", code,
+                0, len(code.splitlines()), token_count, {},
+                last_modified=last_modified
+            )]
 
         # Handle different file types
         if language.name in ["markdown", "rst", "text"]:
-            return self._chunk_document(code, relative_path, language.name)
+            return self._chunk_document(code, relative_path, language.name, last_modified)
         elif language.name in ["json", "yaml", "toml", "ini"]:
-            return self._chunk_config(code, relative_path, language.name)
+            return self._chunk_config(code, relative_path, language.name, last_modified)
         else:
-            return self._parse_code_file(code, relative_path, language, repo_path)
+            return self._parse_code_file(code, relative_path, language, repo_path, last_modified)
 
-    def _parse_code_file(self, code: str, relative_path: str, language: Language, repo_path: str) -> List[Dict[str, Any]]:
+    def _get_module_path(self, relative_path: str, repo_path: str) -> str:
+        """Get module path for any code file"""
+        path_parts = relative_path.split(os.sep)
+        filename = path_parts[-1]
+        
+        # Remove extension for code files
+        code_extensions = {".py", ".js", ".ts", ".go", ".rs", ".java", ".c", ".cpp", ".h", ".hpp"}
+        if any(filename.endswith(ext) for ext in code_extensions):
+            # Remove all extensions (handles cases like file.test.js)
+            while "." in filename:
+                filename = filename.rsplit(".", 1)[0]
+            path_parts[-1] = filename
+        
+        return '.'.join(path_parts)
+
+    
+
+    def _parse_code_file(self, code: str, relative_path: str, language: Language, repo_path: str, last_modified : float) -> List[Dict[str, Any]]:
         parser = Parser()
         parser.set_language(language)
         tree = parser.parse(bytes(code, "utf8"))
+
+        module_path = self._get_module_path(relative_path, repo_path)
 
         print(f"Parsing {relative_path} with Tree-sitter for {language.name}...")
         
         # Extract file-level context
         file_context = self._get_file_context(tree.root_node, language, code, relative_path, repo_path)
+        file_context.update({
+            "module" : module_path,
+            "last_modified": last_modified,
+        })
         
         chunks = []
         
@@ -445,39 +627,28 @@ class RepoParser:
         return exports
 
     def _create_file_overview(self, code: str, file_path: str, language: Language, file_context: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Create a file overview chunk"""
+        """Create a simple file overview"""
         lines = code.splitlines()
-        if len(lines) < 5:  # Skip very small files
+        if len(lines) < 10:  # Too small for overview
             return None
-            
-        # Create overview with first few lines and file stats
-        overview_lines = []
-        if file_context.get("file_docstring"):
-            overview_lines.append(f"File: {file_path}")
-            overview_lines.append(f"Language: {language.name}")
-            overview_lines.append(f"Description: {file_context['file_docstring']}")
         
-        # Add import summary
-        if file_context.get("imports"):
-            overview_lines.append(f"Imports: {len(file_context['imports'])} modules")
-            
-        # Add first few non-import lines for context
-        code_preview = []
-        for line in lines[:10]:
-            if not any(imp_keyword in line for imp_keyword in ["import", "from", "#include", "use"]):
-                code_preview.append(line)
-            if len(code_preview) >= 5:
+        # Get first 20 lines or until first function/class
+        overview_lines = []
+        for i, line in enumerate(lines[:20]):
+            overview_lines.append(line)
+            # Stop at first major symbol
+            if any(keyword in line for keyword in ["def ", "class ", "function ", "interface "]):
                 break
-                
-        if code_preview:
-            overview_lines.extend(["", "Preview:"] + code_preview)
-            
+        
         overview_content = "\n".join(overview_lines)
         token_count = len(self.encoding.encode(overview_content))
         
+        if token_count < 50:  # Too small to be useful
+            return None
+        
         return self._create_chunk_dict(
-            file_path, language, "file_overview", overview_content, 
-            0, min(10, len(lines)), token_count, file_context, is_overview=True
+            file_path, language, "file_overview", overview_content,
+            0, len(overview_lines), token_count, {}, is_overview=True
         )
 
     def _get_docstring(self, node: Node, language: Language) -> Optional[str]:
@@ -529,66 +700,138 @@ class RepoParser:
             except Exception as e:
                 print(f"Error extracting out_calls: {e}")
         return list(set(out_calls))  # Remove duplicates
-
-    def _recursive_chunker(self, root_node: Node, code: str, file_path: str, language: Language, 
-                file_context: Dict[str, Any], parent_context: Dict[str, Any] = None) -> Generator[Dict[str, Any], None, None]:
-        # Use a stack for iterative traversal
-        stack = [(root_node, parent_context or {})]
-        processed_nodes = 0
-
-        # print the logs with function name and file path
+    
+    def _split_chunk_simple(self, code: str, file_path: str, language: Language, symbol_type: str, 
+                       start_line: int, context: Dict[str, Any]) -> Generator[Dict[str, Any], None, None]:
+        """Simple chunk splitting without overlap complexity"""
+        lines = code.splitlines()
         
-        while stack:
-            node, current_parent_context = stack.pop()
-            processed_nodes += 1
+        # Split by logical sections (try to keep functions/classes together)
+        if len(lines) <= 50:  # Small enough, don't split
+            token_count = len(self.encoding.encode(code))
+            yield self._create_chunk_dict(file_path, language, symbol_type, code, start_line, start_line + len(lines) - 1, token_count, context)
+            return
+        
+        # Split into reasonable chunks
+        chunk_size_lines = 30
+        for i in range(0, len(lines), chunk_size_lines):
+            chunk_lines = lines[i:i + chunk_size_lines]
+            chunk_code = "\n".join(chunk_lines)
             
-            is_symbol = language.name in self.queries and node.type in self.queries[language.name]["symbols"]
-
-
-            if is_symbol:
-                start_line = node.start_point[0]
-                end_line = node.end_point[0]
-                symbol_code = "\n".join(code.splitlines()[start_line:end_line+1])
-                token_count = len(self.encoding.encode(symbol_code))
-
-                # Skip empty symbols
-                # Extract symbol name
-                symbol_name = self._get_symbol_name(node, language)
+            if chunk_code.strip():
+                token_count = len(self.encoding.encode(chunk_code))
+                chunk_start_line = start_line + i
+                chunk_end_line = start_line + i + len(chunk_lines) - 1
                 
-                context = {
-                    "docstring": self._get_docstring(node, language),
-                    "imports": file_context["imports"],
-                    "out_calls": self._get_out_calls(node, language),
-                    "parent_class": current_parent_context.get("class_name"),
-                    "parent_namespace": current_parent_context.get("namespace"),
-                    "symbol_name": symbol_name,
-                    "file_docstring": file_context.get("file_docstring"),
-                    "package_path": file_context.get("package_path")
-                }
+                yield self._create_chunk_dict(
+                    file_path, language, f"split_{symbol_type}", chunk_code,
+                    chunk_start_line, chunk_end_line, token_count, context
+                )
 
-                if token_count > self.chunk_size:
-                    yield from self._split_chunk_improved(symbol_code, file_path, language, node.type, start_line, context)
-                else:
-                    yield self._create_chunk_dict(file_path, language, node.type, symbol_code, start_line, end_line, token_count, context)
-
-                # Print debug info
-
-                # Update parent context for children
-                new_parent_context = current_parent_context.copy()
-                if node.type in ["class_definition", "class_declaration", "class_specifier"]:
-                    new_parent_context["class_name"] = symbol_name
-                elif node.type in ["namespace_definition", "mod_item"]:
-                    new_parent_context["namespace"] = symbol_name
+    
+    def _recursive_chunker(self, root_node: Node, code: str, file_path: str, language: Language, 
+            file_context: Dict[str, Any], parent_context: Dict[str, Any] = None) -> Generator[Dict[str, Any], None, None]:
+        """Simplified recursive chunker with function/class preservation"""
+        
+        # Skip tiny assignments and variable declarations - they're noise
+        SKIP_SYMBOLS = {"assignment", "variable_declaration", "expression_statement"}
+        
+        # Only process meaningful symbols
+        MEANINGFUL_SYMBOLS = {
+            "function_definition", "class_definition", "method_definition",
+            "function_declaration", "class_declaration", "interface_declaration",
+            "struct_item", "impl_item", "trait_item", "enum_item"
+        }
+        
+        stack = [(root_node, parent_context or {}, 0)]
+        visited = set()
+        processed = 0
+        
+        while stack and processed < 1000:  # Safety limit
+            node, current_parent_context, depth = stack.pop()
+            
+            if id(node) in visited or depth > 20:
+                continue
+                
+            visited.add(id(node))
+            processed += 1
+            
+            # Only process meaningful symbols
+            if (hasattr(node, 'type') and 
+                node.type in MEANINGFUL_SYMBOLS and
+                node.type not in SKIP_SYMBOLS):
+                
+                try:
+                    start_line = node.start_point[0]
+                    end_line = node.end_point[0]
+                    symbol_code = "\n".join(code.splitlines()[start_line:end_line+1])
+                    
+                    if not symbol_code.strip():
+                        continue
+                        
+                    token_count = len(self.encoding.encode(symbol_code))
+                    symbol_name = self._get_symbol_name(node, language)
+                    
+                    # Skip if too small (likely noise)
+                    if token_count < 10 and node.type not in ["class_definition", "class_declaration"]:
+                        continue
+                    
+                    context = {
+                        "symbol_name": symbol_name,
+                        "parent_class": current_parent_context.get("class_name")
+                    }
+                    
+                    # NEW: Only split if token count is 3x chunk size (keep functions/classes intact)
+                    if token_count > self.chunk_size * 3:
+                        # Split large chunks
+                        yield from self._split_chunk_improved(symbol_code, file_path, language, node.type, start_line, context)
+                    else:
+                        # NEW: Get full symbol signature
+                        symbol_signature = self._get_symbol_signature(node, language, code)
+                        yield self._create_chunk_dict(
+                            file_path, language, node.type, symbol_code, 
+                            start_line, end_line, token_count, context,
+                            symbol_signature=symbol_signature
+                        )
+                    
+                    # Update parent context
+                    new_parent_context = current_parent_context.copy()
+                    if node.type in ["class_definition", "class_declaration"]:
+                        new_parent_context["class_name"] = symbol_name
+                        
+                except Exception as e:
+                    print(f"Error processing {node.type} in {file_path}: {e}")
+                    continue
             else:
                 new_parent_context = current_parent_context
+            
+            # Add children to stack
+            if depth < 20 and hasattr(node, 'children'):
+                for child in reversed(node.children):
+                    if hasattr(child, 'type') and id(child) not in visited:
+                        stack.append((child, new_parent_context, depth + 1))
 
-            # Handle variables and decorators
 
-            if processed_nodes % 50 == 0:
-                print(f"Processed {processed_nodes} nodes...")
-            # Add children to stack in reverse order
-            for child in reversed(node.children):
-                stack.append((child, new_parent_context))
+    
+    def _get_symbol_signature(self, node: Node, language: Language, code: str) -> str:
+        """Get full function/class signature for any language"""
+        if language.name == "python":
+            if node.type == "function_definition":
+                # Capture from 'def' to colon
+                start = node.start_byte
+                colon = code.find(":", node.start_byte)
+                return code[start:colon + 1] if colon != -1 else node.text.decode("utf-8")
+            elif node.type == "class_definition":
+                # Capture from 'class' to colon
+                start = node.start_byte
+                colon = code.find(":", node.start_byte)
+                return code[start:colon + 1] if colon != -1 else node.text.decode("utf-8")
+        
+        # Generic implementation for other languages
+        return self._get_symbol_name(node, language) or node.type
+
+
+
 
     def _get_symbol_name(self, node: Node, language: Language) -> Optional[str]:
         """Extract the name of a symbol (function, class, etc.)"""
@@ -607,21 +850,46 @@ class RepoParser:
         return None
 
     def _split_chunk_improved(self, code: str, file_path: str, language: Language, symbol_type: str, 
-                            start_line: int, context: Dict[str, Any]) -> Generator[Dict[str, Any], None, None]:
-        """Improved chunk splitting with better line tracking"""
+                        start_line: int, context: Dict[str, Any]) -> Generator[Dict[str, Any], None, None]:
+        """Improved chunk splitting with better line tracking and infinite loop prevention"""
         lines = code.splitlines()
         tokens = self.encoding.encode(code)
         
+        if len(tokens) <= self.chunk_size:
+            # If the code is small enough, just return it as a single chunk
+            yield self._create_chunk_dict(
+                file_path, language, symbol_type, code, 
+                start_line, start_line + len(lines) - 1, len(tokens), context
+            )
+            return
+        
         chunk_start = 0
         chunk_num = 0
+        max_chunks = 100  # Safety limit to prevent infinite loops
         
-        while chunk_start < len(tokens):
+        while chunk_start < len(tokens) and chunk_num < max_chunks:
             chunk_end = min(chunk_start + self.chunk_size, len(tokens))
+            
+            # Ensure we're making progress - if chunk_end <= chunk_start, break
+            if chunk_end <= chunk_start:
+                print(f"⚠️ Breaking split loop: chunk_end ({chunk_end}) <= chunk_start ({chunk_start}) for {file_path}")
+                break
+                
             chunk_tokens = tokens[chunk_start:chunk_end]
-            chunk_code = self.encoding.decode(chunk_tokens)
+            
+            # Safety check for empty chunks
+            if not chunk_tokens:
+                print(f"⚠️ Empty chunk tokens at position {chunk_start} for {file_path}")
+                break
+                
+            try:
+                chunk_code = self.encoding.decode(chunk_tokens)
+            except Exception as e:
+                print(f"⚠️ Error decoding chunk tokens for {file_path}: {e}")
+                break
             
             # More accurate line number calculation
-            prefix_code = self.encoding.decode(tokens[:chunk_start])
+            prefix_code = self.encoding.decode(tokens[:chunk_start]) if chunk_start > 0 else ""
             prefix_lines = prefix_code.count('\n')
             chunk_lines = chunk_code.count('\n')
             
@@ -639,28 +907,70 @@ class RepoParser:
                 chunk_start_line, chunk_end_line, len(chunk_tokens), split_context
             )
             
-            chunk_start = chunk_end - self.chunk_overlap
+            # Calculate next chunk start with overlap, ensuring we make progress
+            next_start = chunk_end - self.chunk_overlap
+            
+            # Ensure we're making progress - if next_start <= chunk_start, advance by at least 1 token
+            if next_start <= chunk_start:
+                next_start = chunk_start + max(1, self.chunk_size // 2)  # Advance by at least half chunk size
+                print(f"⚠️ Forced advance from {chunk_start} to {next_start} for {file_path}")
+            
+            chunk_start = next_start
             chunk_num += 1
+            
+            # Additional safety check
+            if chunk_num >= max_chunks:
+                print(f"⚠️ Reached maximum chunk limit ({max_chunks}) for symbol in {file_path}")
+                break
+        
+        if chunk_num >= max_chunks:
+            print(f"⚠️ Split operation hit safety limit for {file_path} - may have truncated content")
 
-    def _chunk_document(self, content: str, file_path: str, doc_type: str) -> List[Dict[str, Any]]:
+
+
+    def _chunk_document(self, content: str, file_path: str, doc_type: str, last_modified : float) -> List[Dict[str, Any]]:
         """Enhanced document chunking for markdown, rst, etc."""
         chunks = []
         
         if doc_type == "markdown":
-            # Split by headers with proper hierarchy
-            sections = self._split_markdown_by_headers(content)
-            for section in sections:
-                if section["content"].strip():
-                    token_count = len(self.encoding.encode(section["content"]))
-                    if token_count > self.chunk_size:
-                        # Further split large sections
-                        chunks.extend(self._split_large_text(section["content"], file_path, "markdown", "section"))
+            sections = []
+            current_section = []
+            in_code_fence = False
+            fence_char = None
+            
+            for i, line in enumerate(content.splitlines()):
+                # Detect code fences
+                if line.startswith("```") or line.startswith("~~~"):
+                    if in_code_fence and line.startswith(fence_char):
+                        in_code_fence = False
+                        fence_char = None
                     else:
-                        chunks.append(self._create_chunk_dict(
-                            file_path, "markdown", "section", section["content"], 
-                            section["start_line"], section["end_line"], token_count, 
-                            {"header": section.get("header"), "level": section.get("level")}
-                        ))
+                        in_code_fence = True
+                        fence_char = line[:3]
+
+                # preserve code blocks as single chunks
+                if in_code_fence:
+                    current_section.append(line)
+                    continue
+                
+                # Only split outside code fences
+                if not in_code_fence and line.startswith("#"):
+                    if current_section:
+                        sections.append("\n".join(current_section))
+                        current_section = []
+                current_section.append(line)
+            
+            if current_section:
+                sections.append("\n".join(current_section))
+            
+            # Create chunks for each section
+            for i, section in enumerate(sections):
+                token_count = len(self.encoding.encode(section))
+                chunks.append(self._create_chunk_dict(
+                    file_path, doc_type, "section", section, 
+                    0, 0, token_count, {"section_index": i},
+                    last_modified=last_modified
+                ))
         else:
             # Simple paragraph-based chunking for other document types
             paragraphs = content.split('\n\n')
@@ -734,49 +1044,43 @@ class RepoParser:
                 0, 0, len(chunk_tokens), {"is_split": True}
             )
 
-    def _chunk_config(self, content: str, file_path: str, config_type: str) -> List[Dict[str, Any]]:
+    def _chunk_config(self, content: str, file_path: str, config_type: str, last_modified : float = None) -> List[Dict[str, Any]]:
         """Handle configuration files"""
         token_count = len(self.encoding.encode(content))
         
         if token_count <= self.chunk_size:
             return [self._create_chunk_dict(
                 file_path, config_type, "config_file", content, 
-                0, len(content.splitlines()), token_count, 
-                {"file_type": config_type}
+                0, len(content.splitlines()), token_count,
+                {"file_type": config_type}, last_modified=last_modified
             )]
         else:
             return list(self._split_large_text(content, file_path, config_type, "config_section"))
 
     def _create_chunk_dict(self, file_path: str, language: Language, symbol_type: str, code: str, 
-                          start_line: int, end_line: int, token_count: int, context: Dict[str, Any], 
-                          is_overview: bool = False) -> Dict[str, Any]:
-        """Create a comprehensive chunk dictionary"""
+                      start_line: int, end_line: int, token_count: int, context: Dict[str, Any], 
+                      is_overview: bool = False, last_modified : float = None, symbol_signature : str = None) -> Dict[str, Any]:
+        """Create a simplified chunk dictionary - only essential data for embeddings"""
+        
+        # What goes into embedding (clean, focused content)
+        embed_content = code.strip()
+                
         return {
             "id": str(uuid.uuid4()),
+            "content": embed_content,
             "file_path": file_path,
             "language": language.name if hasattr(language, 'name') else str(language),
             "symbol_type": symbol_type,
             "symbol_name": context.get("symbol_name"),
-            "docstring": context.get("docstring"),
-            "code": code,
+            "symbol_signature": symbol_signature,  # NEW: Full signature
             "start_line": start_line + 1,
             "end_line": end_line + 1,
             "token_count": token_count,
-            "imports": context.get("imports", []),
-            "out_calls": context.get("out_calls", []),
             "parent_class": context.get("parent_class"),
-            "parent_namespace": context.get("parent_namespace"),
-            "package_path": context.get("package_path"),
-            "file_docstring": context.get("file_docstring"),
             "is_overview": is_overview,
-            "is_split": context.get("is_split", False),
-            "split_index": context.get("split_index"),
-            "header": context.get("header"),
-            "header_level": context.get("level"),
-            "file_type": context.get("file_type"),
-            "created_at": pd.Timestamp.now().isoformat()
+            "module": context.get("package_path", ""),  # NEW: Module path
+            "last_modified": datetime.datetime.fromtimestamp(last_modified).isoformat() if last_modified else None  # NEW: Timestamp
         }
-
 
 def main():
     parser = argparse.ArgumentParser(description='Enhanced repository parser for embeddings')
