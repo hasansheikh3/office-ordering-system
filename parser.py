@@ -15,6 +15,7 @@ import time
 import datetime
 import concurrent.futures
 import threading
+from tree_sitter_languages import get_parser, get_language
 
 # Import tree-sitter language modules
 try:
@@ -37,10 +38,16 @@ except ImportError as e:
 
 
 class RepoParser:
+    _encoding_cache = None
+
     def __init__(self, chunk_size: int = 512, chunk_overlap: int = 64, ignore_dirs: List[str] = None, ignore_files: List[str] = None):
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
-        self.encoding = tiktoken.get_encoding("cl100k_base")
+        if RepoParser._encoding_cache is None:
+            RepoParser._encoding_cache = tiktoken.get_encoding("cl100k_base")
+        self.encoding = RepoParser._encoding_cache
+        self._compiled_queries = {}
+        self._query_lock = threading.Lock()
         self.ignore_dirs = ignore_dirs if ignore_dirs else []
         self.ignore_files = ignore_files if ignore_files else []
         self.language_map = {
@@ -234,18 +241,61 @@ class RepoParser:
         patterns.extend(self.ignore_dirs)
         patterns.extend(self.ignore_files)
         return pathspec.PathSpec.from_lines('gitwildmatch', patterns)
+    
+    def _is_parseable_file_fast(self, file_path: str) -> bool:
+        """Optimized version with early returns"""
+        try:
+            # Quick size check first
+            size = os.path.getsize(file_path)
+            if size == 0 or size > 10 * 1024 * 1024:  # Skip empty or >10MB files
+                return False
+            
+            # Extension already checked in caller, so just return True
+            return True
+        except (OSError, IOError):
+            return False
+
+    def _get_compiled_query(self, language: Language, query_name: str) -> Optional[Any]:
+        """Cache compiled queries for better performance"""
+        cache_key = (language.name if hasattr(language, 'name') else str(language), query_name)
+        
+        if cache_key in self._compiled_queries:
+            return self._compiled_queries[cache_key]
+        
+        if language.name not in self.queries or query_name not in self.queries[language.name]:
+            return None
+        
+        with self._query_lock:
+            # Double-check pattern
+            if cache_key in self._compiled_queries:
+                return self._compiled_queries[cache_key]
+            
+            try:
+                query_text = self.queries[language.name][query_name]
+                compiled_query = language.query(query_text)
+                self._compiled_queries[cache_key] = compiled_query
+                return compiled_query
+            except Exception as e:
+                self._compiled_queries[cache_key] = None
+                return None
+
 
     def get_files_to_parse(self, repo_path: str) -> List[str]:
         spec = self._get_ignore_spec(repo_path)
         files_to_parse = []
+
+        supported_extensions = set(self.language_map.keys())
+
         for root, dirs, files in os.walk(repo_path):
             # Skip ignored directories
             dirs[:] = [d for d in dirs if not spec.match_file(os.path.join(root, d))]
             
             for file in files:
+                if not any(file.lower().endswith(ext) for ext in supported_extensions):
+                    continue
                 file_path = os.path.join(root, file)
                 relative_path = os.path.relpath(file_path, repo_path)
-                if not spec.match_file(relative_path) and self._is_parseable_file(file_path):
+                if not spec.match_file(relative_path) and self._is_parseable_file_fast(file_path):
                     files_to_parse.append(relative_path)
         return sorted(files_to_parse)
 
@@ -317,71 +367,74 @@ class RepoParser:
     def parse_repo(self, repo_path: str, max_workers: int = None) -> List[Dict[str, Any]]:
         """Parse repository with parallel processing for blazing speed"""
         files_to_parse = self.get_files_to_parse(repo_path)
-        all_chunks = []
+        
+        if not files_to_parse:
+            return []
         
         # Determine optimal number of workers
         if max_workers is None:
-            max_workers = min(32, (os.cpu_count() or 1) + 4)  # Default from ThreadPoolExecutor
+            # Scale workers based on workload
+            if len(files_to_parse) < 50:
+                max_workers = min(8, os.cpu_count() or 1)
+            elif len(files_to_parse) < 200:
+                max_workers = min(16, (os.cpu_count() or 1) * 2)
+            else:
+                max_workers = min(32, (os.cpu_count() or 1) * 4)
+
         
         print(f"🚀 Parsing {len(files_to_parse)} files with {max_workers} workers...")
         
         # Batch files for better progress tracking
-        batch_size = max(1, len(files_to_parse) // 20)  # 20 progress updates
+        all_chunks = []
         successful_files = 0
         failed_files = 0
         total_chunks = 0
         
         start_time = time.time()
+
+        chunksize = max(1, len(files_to_parse) // (max_workers * 4))
         
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # Submit all parsing tasks
+            # Submit all tasks
             future_to_file = {
                 executor.submit(self._parse_file_safe, os.path.join(repo_path, file_path), file_path, repo_path): file_path
                 for file_path in files_to_parse
             }
             
-            # Process completed tasks with progress tracking
+            # Process with better progress tracking
             with tqdm(total=len(files_to_parse), desc="Parsing files", unit="files") as pbar:
                 for future in concurrent.futures.as_completed(future_to_file):
                     file_path = future_to_file[future]
                     
                     try:
-                        file_chunks = future.result(timeout=30)  # 30s timeout per file
+                        file_chunks = future.result(timeout=30)
                         if file_chunks:
                             all_chunks.extend(file_chunks)
-                            total_chunks += len(file_chunks)
                             successful_files += 1
-                            pbar.set_postfix({
-                                'chunks': total_chunks,
-                                'success': successful_files,
-                                'failed': failed_files
-                            })
                         else:
                             failed_files += 1
                             
-                    except concurrent.futures.TimeoutError:
-                        print(f"  ⏰ Timeout parsing {file_path}")
-                        failed_files += 1
                     except Exception as e:
-                        print(f"  ❌ Error parsing {file_path}: {str(e)}")
                         failed_files += 1
                     
+                    # Update progress less frequently for better performance
+                    if (successful_files + failed_files) % 10 == 0:
+                        pbar.set_postfix({
+                            'chunks': len(all_chunks),
+                            'success': successful_files,
+                            'failed': failed_files
+                        })
                     pbar.update(1)
         
         elapsed_time = time.time() - start_time
         
-        # Enhanced completion stats
-        print(f"\n✅ Parallel parsing complete!")
-        print(f"⏱️  Total time: {elapsed_time:.2f}s")
-        print(f"📊 Files processed: {successful_files}/{len(files_to_parse)} ({successful_files/len(files_to_parse)*100:.1f}%)")
-        print(f"🧩 Total chunks: {total_chunks:,}")
-        print(f"🚄 Average speed: {len(files_to_parse)/elapsed_time:.1f} files/sec")
-        print(f"⚡ Chunk generation rate: {total_chunks/elapsed_time:.1f} chunks/sec")
-        
-        if failed_files > 0:
-            print(f"⚠️  Failed files: {failed_files}")
+        print(f"\n✅ Parsing complete in {elapsed_time:.2f}s")
+        print(f"📊 Success rate: {successful_files}/{len(files_to_parse)} ({successful_files/len(files_to_parse)*100:.1f}%)")
+        print(f"🧩 Generated {len(all_chunks):,} chunks")
+        print(f"⚡ Speed: {len(files_to_parse)/elapsed_time:.1f} files/sec")
         
         return all_chunks
+
 
     def _parse_file_safe(self, file_path: str, relative_path: str, repo_path: str) -> List[Dict[str, Any]]:
         """Thread-safe wrapper for file parsing with error handling"""
@@ -417,9 +470,18 @@ class RepoParser:
 
         # Handle document/config types (no tree-sitter needed)
         if lang_name in ["markdown", "rst", "text", "json", "yaml", "toml", "ini"]:
-            class SimpleLang:
-                def __init__(self, name): self.name = name
-            return SimpleLang(lang_name)
+
+            if not hasattr(self, '_simple_lang_cache'):
+                self._simple_lang_cache = {}
+            if lang_name not in self._simple_lang_cache:
+                class SimpleLang:
+                    def __init__(self, name): self.name = name
+                self._simple_lang_cache[lang_name] = SimpleLang(lang_name)
+            return self._simple_lang_cache[lang_name]
+
+        if lang_name in self.ts_languages:
+            return self.ts_languages[lang_name]
+        
 
         # Thread-safe language loading with lock
         with self._language_lock:
@@ -428,10 +490,12 @@ class RepoParser:
                 return self.ts_languages[lang_name]
 
             try:
-                ts_lang = Language(f"/home/hasan/.tree-sitter/repos/{lang_name}.so", lang_name)
+                # ts_lang = Language(f"/home/hasan/.tree-sitter/repos/{lang_name}.so", lang_name)
+                ts_lang = get_language(lang_name)
                 self.ts_languages[lang_name] = ts_lang
                 return ts_lang
             except Exception as e:
+                self.ts_languages[lang_name] = None
                 print(f"❌ Failed to load {lang_name}: {e}")
                 return None
 
@@ -485,8 +549,9 @@ class RepoParser:
     
 
     def _parse_code_file(self, code: str, relative_path: str, language: Language, repo_path: str, last_modified : float) -> List[Dict[str, Any]]:
-        parser = Parser()
-        parser.set_language(language)
+        # parser = Parser()
+        # parser.set_language(language)
+        parser = get_parser(language.name)
         tree = parser.parse(bytes(code, "utf8"))
 
         module_path = self._get_module_path(relative_path, repo_path)
@@ -517,32 +582,6 @@ class RepoParser:
         print(f"Extracted {len(chunks)} chunks from {relative_path}")
         
         return chunks
-
-    def _get_language(self, file_path: str) -> Optional[Language]:
-        extension = os.path.splitext(file_path)[1].lower()
-        lang_name = self.language_map.get(extension)
-
-        if not lang_name:
-            return None
-
-        # Handle document/config types
-        if lang_name in ["markdown", "rst", "text", "json", "yaml", "toml", "ini"]:
-            class SimpleLang:
-                def __init__(self, name): self.name = name
-            return SimpleLang(lang_name)
-
-        # Return cached if already loaded
-        if lang_name in self.ts_languages:
-            return self.ts_languages[lang_name]
-
-        try:
-            ts_lang = Language(f"/home/hasan/.tree-sitter/repos/{lang_name}.so", lang_name)
-            self.ts_languages[lang_name] = ts_lang
-            print(f"✅ Loaded Tree-sitter language: {lang_name}")
-            return ts_lang
-        except Exception as e:
-            print(f"❌ Failed to load {lang_name} from tree-sitter: {e}")
-            return None
 
     def _get_file_context(self, root_node: Node, language: Language, code: str, relative_path: str, repo_path: str) -> Dict[str, Any]:
         """Extract comprehensive file-level context"""
@@ -670,18 +709,25 @@ class RepoParser:
         return None
 
     def _get_imports(self, node: Node, language: Language) -> List[str]:
+        """Optimized imports extraction"""
+        compiled_query = self._get_compiled_query(language, "imports")
+        if not compiled_query:
+            return []
+        
         imports = []
-        if language.name in self.queries and "imports" in self.queries[language.name]:
-            try:
-                query = language.query(self.queries[language.name]["imports"])
-                captures = query.captures(node)
-                for capture, _ in captures:
-                    import_text = capture.text.decode("utf-8").strip()
-                    if import_text:
-                        imports.append(import_text)
-            except Exception as e:
-                print(f"Error extracting imports: {e}")
-        return list(set(imports))  # Remove duplicates
+        try:
+            captures = compiled_query.captures(node)
+            # Use set for deduplication, then convert to list
+            import_set = set()
+            for capture, _ in captures:
+                import_text = capture.text.decode("utf-8").strip()
+                if import_text:
+                    import_set.add(import_text)
+            imports = list(import_set)
+        except Exception as e:
+            print(f"Error extracting imports: {e}")
+        
+        return imports
 
 
     def _get_out_calls(self, node: Node, language: Language) -> List[str]:
@@ -1059,28 +1105,40 @@ class RepoParser:
 
     def _create_chunk_dict(self, file_path: str, language: Language, symbol_type: str, code: str, 
                       start_line: int, end_line: int, token_count: int, context: Dict[str, Any], 
-                      is_overview: bool = False, last_modified : float = None, symbol_signature : str = None) -> Dict[str, Any]:
-        """Create a simplified chunk dictionary - only essential data for embeddings"""
+                      is_overview: bool = False, last_modified: float = None, symbol_signature: str = None) -> Dict[str, Any]:
+        """Optimized chunk creation"""
         
-        # What goes into embedding (clean, focused content)
+        # Pre-strip content once
         embed_content = code.strip()
-                
+        
+        # Use faster UUID generation
+        chunk_id = uuid.uuid4().hex  # .hex is faster than str()
+        
+        # Get language name once
+        lang_name = language.name if hasattr(language, 'name') else str(language)
+        
+        # Pre-calculate timestamp if needed
+        timestamp = None
+        if last_modified:
+            timestamp = datetime.datetime.fromtimestamp(last_modified).isoformat()
+        
         return {
-            "id": str(uuid.uuid4()),
+            "id": chunk_id,
             "content": embed_content,
             "file_path": file_path,
-            "language": language.name if hasattr(language, 'name') else str(language),
+            "language": lang_name,
             "symbol_type": symbol_type,
             "symbol_name": context.get("symbol_name"),
-            "symbol_signature": symbol_signature,  # NEW: Full signature
+            "symbol_signature": symbol_signature,
             "start_line": start_line + 1,
             "end_line": end_line + 1,
             "token_count": token_count,
             "parent_class": context.get("parent_class"),
             "is_overview": is_overview,
-            "module": context.get("package_path", ""),  # NEW: Module path
-            "last_modified": datetime.datetime.fromtimestamp(last_modified).isoformat() if last_modified else None  # NEW: Timestamp
+            "module": context.get("package_path", ""),
+            "last_modified": timestamp
         }
+
 
 def main():
     parser = argparse.ArgumentParser(description='Enhanced repository parser for embeddings')

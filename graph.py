@@ -12,6 +12,7 @@ from dataclasses import dataclass, asdict
 from tqdm import tqdm
 import warnings
 warnings.filterwarnings('ignore')
+from storage import OptimizedGraphStorage
 
 
 @dataclass
@@ -685,6 +686,20 @@ def main():
         # Export graph
         output_path = f"{args.output}.{args.format}"
         builder.export_graph(output_path, args.format)
+
+        print("\n Preparing graph data for optimized storage...")
+        graph_data = {
+            'nodes' : [node.to_dict() for node in builder.nodes.values()],
+            'edges' : [edge.to_dict() for edge in builder.edges]
+        }
+
+        storage_path = f"{args.output}_storage"
+        storage = OptimizedGraphStorage(storage_dir=storage_path)
+        storage.save_graph(graph_data)
+
+        print(f"\n✅ Graph processing and storage complete!")
+        print(f"📦 Optimized storage created at: {storage_path}")
+
         
         # Perform analysis
         if args.analysis:
